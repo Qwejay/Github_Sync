@@ -1,71 +1,81 @@
-name: Global Auto-Discovery Sync Hub
+name: Universal Multi-Platform Code Sync Hub
 
 on:
   schedule:
     - cron: '0 18 * * *' # 每天北京时间凌晨 2:00 自动运行
-  workflow_dispatch: # 支持手动点击一键同步
-
-# ==================== 统一配置区域 ====================
-env:
-  GITHUB_USER: "Qwejay"          # 您的 GitHub 用户名
-  GITLAB_USER: "oauth2"          # GitLab 认证用户名
-  # 移除了 GITCODE_USER，改为和 Gitee 一样动态自动获取，更安全！
-# ====================================================
+  workflow_dispatch: # 支持手动一键触发同步
 
 jobs:
   # ====================================================
-  # 阶段一：动态获取所有的公开仓库，生成 Matrix 变量
+  # 阶段一：动态获取平台绑定账号，自动提取公开仓库列表
   # ====================================================
   discover-repos:
     runs-on: ubuntu-latest
     outputs:
       repo_list: ${{ steps.get-list.outputs.repo_list }}
-      gitee_real_user: ${{ steps.prep.outputs.gitee_real_user }}
-      gitcode_real_user: ${{ steps.prep.outputs.gitcode_real_user }}
+      gitee_user: ${{ steps.prep.outputs.gitee_user }}
+      gitlab_user: ${{ steps.prep.outputs.gitlab_user }}
+      gitcode_user: ${{ steps.prep.outputs.gitcode_user }}
+      has_gitee: ${{ steps.prep.outputs.has_gitee }}
+      has_gitlab: ${{ steps.prep.outputs.has_gitlab }}
+      has_gitcode: ${{ steps.prep.outputs.has_gitcode }}
     steps:
-      # 1. 自动诊断并动态获取 Gitee 和 GitCode 真实的底层用户名
-      - name: Diagnostic & Fetch Usernames
+      # 1. 自动诊断并识别已配置 Token 的平台用户名
+      - name: Diagnostic & Auto-Discover Platform Usernames
         id: prep
         run: |
-          if [ -z "${{ secrets.GITEE_TOKEN }}" ]; then echo "❌ GITEE_TOKEN 未配置"; exit 1; fi
-          if [ -z "${{ secrets.GITLAB_TOKEN }}" ]; then echo "❌ GITLAB_TOKEN 未配置"; exit 1; fi
-          if [ -z "${{ secrets.GITCODE_TOKEN }}" ]; then echo "❌ GITCODE_TOKEN 未配置"; exit 1; fi
-          
-          # 获取 Gitee 用户名
-          GITEE_REAL_USER=$(curl -s "https://gitee.com/api/v5/user?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.login')
-          if [ "$GITEE_REAL_USER" = "null" ] || [ -z "$GITEE_REAL_USER" ]; then
-            echo "❌ 无法获取 Gitee 用户名，请检查 GITEE_TOKEN"
-            exit 1
+          # 检查 Gitee
+          if [ -n "${{ secrets.GITEE_TOKEN }}" ]; then
+            GITEE_USER=$(curl -s "https://gitee.com/api/v5/user?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.login // empty')
+            if [ -n "$GITEE_USER" ] && [ "$GITEE_USER" != "null" ]; then
+              echo "gitee_user=$GITEE_USER" >> $GITHUB_OUTPUT
+              echo "has_gitee=true" >> $GITHUB_OUTPUT
+              echo "✅ Gitee 用户识别成功: $GITEE_USER"
+            fi
           fi
-          echo "📢 您的 Gitee Token 实际绑定的底层用户名是: $GITEE_REAL_USER"
-          echo "gitee_real_user=$GITEE_REAL_USER" >> $GITHUB_OUTPUT
 
-          # 获取 GitCode 用户名（注：GitCode 官方 API 域名为 api.gitcode.com）
-          GITCODE_REAL_USER=$(curl -s "https://api.gitcode.com/api/v5/user?access_token=${{ secrets.GITCODE_TOKEN }}" | jq -r '.login')
-          if [ "$GITCODE_REAL_USER" = "null" ] || [ -z "$GITCODE_REAL_USER" ]; then
-            echo "❌ 无法获取 GitCode 用户名，请检查 GITCODE_TOKEN"
-            exit 1
+          # 检查 GitLab
+          if [ -n "${{ secrets.GITLAB_TOKEN }}" ]; then
+            GITLAB_USER=$(curl -s --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/user" | jq -r '.username // empty')
+            if [ -n "$GITLAB_USER" ] && [ "$GITLAB_USER" != "null" ]; then
+              echo "gitlab_user=$GITLAB_USER" >> $GITHUB_OUTPUT
+              echo "has_gitlab=true" >> $GITHUB_OUTPUT
+              echo "✅ GitLab 用户识别成功: $GITLAB_USER"
+            fi
           fi
-          echo "📢 您的 GitCode Token 实际绑定的底层用户名是: $GITCODE_REAL_USER"
-          echo "gitcode_real_user=$GITCODE_REAL_USER" >> $GITHUB_OUTPUT
 
-      # 2. 调用 API 获取所有非 Fork 的公开仓库列表，生成 JSON 数组
-      - name: Get Repository List
+          # 检查 GitCode
+          if [ -n "${{ secrets.GITCODE_TOKEN }}" ]; then
+            GITCODE_USER=$(curl -s "https://api.gitcode.com/api/v5/user?access_token=${{ secrets.GITCODE_TOKEN }}" | jq -r '.login // empty')
+            if [ -n "$GITCODE_USER" ] && [ "$GITCODE_USER" != "null" ]; then
+              echo "gitcode_user=$GITCODE_USER" >> $GITHUB_OUTPUT
+              echo "has_gitcode=true" >> $GITHUB_OUTPUT
+              echo "✅ GitCode 用户识别成功: $GITCODE_USER"
+            fi
+          fi
+
+      # 2. 调用 GitHub API 获取当前用户所有非 Fork 的公开仓库列表
+      - name: Get GitHub Repository List
         id: get-list
         run: |
+          GITHUB_USER="${{ github.repository_owner }}"
+          CURRENT_REPO="${{ github.event.repository.name }}"
+          
+          echo "🔍 正在扫描 GitHub 用户 [$GITHUB_USER] 的公开仓库..."
+          
           REPOS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/users/${{ env.GITHUB_USER }}/repos?per_page=100" \
-            | jq -c '[.[] | select(.fork == false and .name != "git-sync-hub") | .name]')
+            "https://api.github.com/users/${GITHUB_USER}/repos?per_page=100" \
+            | jq -c --arg SELF "$CURRENT_REPO" '[.[] | select(.fork == false and .name != $SELF) | .name]')
           
           if [ "$REPOS" = "[]" ] || [ -z "$REPOS" ]; then
-            echo "❌ 未检测到需要同步的仓库"
+            echo "❌ 未检测到需要同步的公开仓库"
             exit 1
           fi
-          echo "发现以下仓库准备进入同步队列: $REPOS"
+          echo "📢 准备同步以下仓库队列: $REPOS"
           echo "repo_list=$REPOS" >> $GITHUB_OUTPUT
 
   # ====================================================
-  # 阶段二：使用并行矩阵（Matrix）同步每个仓库的代码和 Releases
+  # 阶段二：并行矩阵（Matrix）自动建库 & 镜像推送
   # ====================================================
   sync-matrix:
     needs: discover-repos
@@ -73,62 +83,76 @@ jobs:
     strategy:
       matrix:
         repo: ${{ fromJson(needs.discover-repos.outputs.repo_list) }}
-      fail-fast: false     # 单个仓库同步失败不影响其他仓库
-      max-parallel: 8      # 限制并发数为 8，兼顾速度与接口稳定性，防止被目标平台限流
+      fail-fast: false
+      max-parallel: 8
     steps:
-      - name: Create Remote Repositories
+      - name: Auto-Create Remote Repositories
         run: |
           REPO="${{ matrix.repo }}"
-          echo "正在为仓库 [$REPO] 确保远程接收端存在..."
-          
-          echo "👉 1/3 请求 Gitee API..."
-          curl -s -X POST "https://gitee.com/api/v5/user/repos" \
-            -H "Content-Type: application/json" \
-            -d '{"access_token":"${{ secrets.GITEE_TOKEN }}","name":"'"$REPO"'","private":false,"auto_init":false}'
-          echo -e "\n"
-          
-          echo "👉 2/3 请求 GitLab API..."
-          curl -s -X POST "https://gitlab.com/api/v4/projects" \
-            -H "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"name":"'"$REPO"'","visibility":"public","initialize_with_readme":false}'
-          echo -e "\n"
-          
-          echo "👉 3/3 请求 GitCode API..."
-          # 【核心修复】：GitCode 的 access_token 必须放在 URL 参数中传给服务器
-          curl -s -X POST "https://api.gitcode.com/api/v5/user/repos?access_token=${{ secrets.GITCODE_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"name":"'"$REPO"'","private":false,"auto_init":false}'
-          echo -e "\n"
+          echo "🛠️ 正在确保远程仓库 [$REPO] 存在..."
+
+          # Gitee 建库
+          if [ "${{ needs.discover-repos.outputs.has_gitee }}" = "true" ]; then
+            curl -s -X POST "https://gitee.com/api/v5/user/repos" \
+              -H "Content-Type: application/json" \
+              -d '{"access_token":"${{ secrets.GITEE_TOKEN }}","name":"'"$REPO"'","private":false,"auto_init":false}' > /dev/null
+          fi
+
+          # GitLab 建库
+          if [ "${{ needs.discover-repos.outputs.has_gitlab }}" = "true" ]; then
+            curl -s -X POST "https://gitlab.com/api/v4/projects" \
+              -H "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"name":"'"$REPO"'","visibility":"public","initialize_with_readme":false}' > /dev/null
+          fi
+
+          # GitCode 建库
+          if [ "${{ needs.discover-repos.outputs.has_gitcode }}" = "true" ]; then
+            curl -s -X POST "https://api.gitcode.com/api/v5/user/repos?access_token=${{ secrets.GITCODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"name":"'"$REPO"'","private":false,"auto_init":false}' > /dev/null
+          fi
 
       - name: Sync Code & Git Tags
         run: |
           REPO="${{ matrix.repo }}"
-          GITEE_REAL_USER="${{ needs.discover-repos.outputs.gitee_real_user }}"
-          GITCODE_REAL_USER="${{ needs.discover-repos.outputs.gitcode_real_user }}"
-          
-          git clone --mirror "https://github.com/${{ env.GITHUB_USER }}/$REPO.git" temp_repo
+          GITHUB_USER="${{ github.repository_owner }}"
+          GITEE_USER="${{ needs.discover-repos.outputs.gitee_user }}"
+          GITLAB_USER="${{ needs.discover-repos.outputs.gitlab_user }}"
+          GITCODE_USER="${{ needs.discover-repos.outputs.gitcode_user }}"
+
+          git clone --mirror "https://github.com/${GITHUB_USER}/$REPO.git" temp_repo
           cd temp_repo
-          
+
           # 推送到 Gitee
-          git push --mirror "https://${GITEE_REAL_USER}:${{ secrets.GITEE_TOKEN }}@gitee.com/${GITEE_REAL_USER}/$REPO.git" || echo "⚠️ Gitee 代码同步失败"
-          
+          if [ "${{ needs.discover-repos.outputs.has_gitee }}" = "true" ]; then
+            echo "🚀 镜像推送到 Gitee..."
+            git push --mirror "https://${GITEE_USER}:${{ secrets.GITEE_TOKEN }}@gitee.com/${GITEE_USER}/$REPO.git" || echo "⚠️ Gitee 代码同步失败"
+          fi
+
           # 推送到 GitLab
-          git push --mirror "https://${{ env.GITLAB_USER }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.GITHUB_USER }}/$REPO.git" || echo "⚠️ GitLab 代码同步失败"
-          
-          # 推送到 GitCode (已修复：使用动态诊断出的 username 拼凑正确的 Push 路径)
-          git push --mirror "https://${GITCODE_REAL_USER}:${{ secrets.GITCODE_TOKEN }}@gitcode.com/${GITCODE_REAL_USER}/$REPO.git" || echo "⚠️ GitCode 代码同步失败"
-          
+          if [ "${{ needs.discover-repos.outputs.has_gitlab }}" = "true" ]; then
+            echo "🚀 镜像推送到 GitLab..."
+            git push --mirror "https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${GITLAB_USER}/$REPO.git" || echo "⚠️ GitLab 代码同步失败"
+          fi
+
+          # 推送到 GitCode
+          if [ "${{ needs.discover-repos.outputs.has_gitcode }}" = "true" ]; then
+            echo "🚀 镜像推送到 GitCode..."
+            git push --mirror "https://${GITCODE_USER}:${{ secrets.GITCODE_TOKEN }}@gitcode.com/${GITCODE_USER}/$REPO.git" || echo "⚠️ GitCode 代码同步失败"
+          fi
+
           cd ..
           rm -rf temp_repo
 
       - name: Sync Releases to Gitee
+        if: ${{ needs.discover-repos.outputs.has_gitee == 'true' }}
         uses: trustedinster/sync-release-gitee@v1.3
         continue-on-error: true
         with:
-          gitee_owner: ${{ needs.discover-repos.outputs.gitee_real_user }}
+          gitee_owner: ${{ needs.discover-repos.outputs.gitee_user }}
           gitee_repo: ${{ matrix.repo }}
           gitee_token: ${{ secrets.GITEE_TOKEN }}
-          github_owner: ${{ env.GITHUB_USER }}
+          github_owner: ${{ github.repository_owner }}
           github_repo: ${{ matrix.repo }}
           gitee_upload_retry_times: 3
